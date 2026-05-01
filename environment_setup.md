@@ -14,132 +14,83 @@
 
 ## 2. 怎么做
 
-### 第一步：环境初始化与前置配置
-在执行核心编译之前，我们首先要为终端注入必要的环境变量。为了加速所有网络请求，我们在启动脚本的开头设置了针对本地 Mihomo 的全局代理。同时需要定义项目基础路径（`BASE_DIR`），并设置目标克隆仓库的 commit 哈希，以保证可复现性。
-```bash
-# 开启全局代理，利用本机运行的 Mihomo 代理加速 GitHub 及依赖拉取
-export http_proxy=http://127.0.0.1:8890
-export https_proxy=http://127.0.0.1:8890
-export all_proxy=http://127.0.0.1:8890
-
-# 配置基础目录及特定依赖的 Commit 哈希
-export BASE_DIR=${BASE_DIR:-"/root"}
-export SGLANG_COMMIT="bbe9c7eeb520b0a67e92d133dfc137a3688dc7f2"
-export MEGATRON_COMMIT="3714d81d418c9f1bca4594fc35f9e8289f652862"
-
-cd $BASE_DIR
-```
-
-### 第二步：安装并激活 Micromamba 及虚拟环境
-我们在脚本中使用官方脚本安装轻量级的 `micromamba`。创建 `slime` 虚拟环境后，紧接着要导出针对环境的路径变量（如 `CUDA_HOME`），这是让后续所有编译工具能认准环境内依赖的关键步骤。
-```bash
-# 安装 micromamba
-yes '' | "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
-export PS1=tmp
-mkdir -p /root/.cargo/
-touch /root/.cargo/env
-source ~/.bashrc
-
-# 创建并激活环境
-micromamba create -n slime python=3.12 pip -c conda-forge -y
-micromamba activate slime
-
-# 导出环境变量：确保后续所有编译行为只在当前环境路径下寻找依赖
-export CUDA_HOME="$CONDA_PREFIX"
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib:$LD_LIBRARY_PATH
-```
-*注：为了实现极速依赖安装，您也可以在此阶段全局安装并启用 `uv`（即执行 `pip install uv && alias pip="uv pip"`）。*
-
-### 第三步：安装环境级 CUDA 及 PyTorch
-为了彻底解决编译时找不到 `nvcc` 等问题，我们在激活的虚拟环境内部直接安装与 PyTorch 匹配的 CUDA 12.9 工具链及 cuDNN。
-```bash
-# 安装虚拟环境内的 CUDA 工具链
-micromamba install -n slime cuda cuda-nvtx cuda-nvtx-dev nccl -c nvidia/label/cuda-12.9.1 -y
-micromamba install -n slime -c conda-forge cudnn -y
-
-# 安装 PyTorch 及其视觉/音频套件，指定对应 CUDA 12.9 版本的预编译轮子
-pip install cuda-python==12.9
-pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu129
-```
-
-### 第四步：编译安装 SGLang 与构建工具
-由于后续部分依赖（如 Flash Attention 和 Apex）涉及重度 C++ 源码编译，必须先准备好 `cmake` 和 `ninja`。
-```bash
-# 下载 SGLang 源码并锁定到特定版本进行可编辑安装
-git clone https://github.com/sgl-project/sglang.git
-cd sglang
-git checkout ${SGLANG_COMMIT}
-pip install -e "python[all]"
-
-pip install cmake ninja
-```
-
-### 第五步：重度依赖库的源码编译 (Flash-Attn, Apex, Megatron)
-这是整个流程中最容易失败和 OOM 的阶段。针对 Flash Attention，脚本使用了 `MAX_JOBS` 限制并发；针对 Apex 等库，使用了 `--no-build-isolation` 避免隔离构建时找不到依赖。
-```bash
-# 限制并发以防 OOM 编译 Flash Attention
-MAX_JOBS=64 pip -v install flash-attn==2.7.4.post1 --no-build-isolation
-
-# 依次编译/安装其他加速及通信组件
-pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c --no-deps
-pip install --no-build-isolation "transformer_engine[pytorch]==2.10.0"
-pip install flash-linear-attention==0.4.1
-NVCC_APPEND_FLAGS="--threads 4" \
-  pip -v install --disable-pip-version-check --no-cache-dir \
-  --no-build-isolation \
-  --config-settings "--build-option=--cpp_ext --cuda_ext --parallel 8" git+https://github.com/NVIDIA/apex.git@10417aceddd7d5d05d7cbf7b0fc2daad1105f8b4
-
-# 安装其他特定的补丁分支仓库
-pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@dc6876905830430b5054325fa4211ff302169c6b --no-cache-dir --force-reinstall
-pip install git+https://github.com/fzyzcjy/Megatron-Bridge.git@dev_rl --no-build-isolation
-pip install nvidia-modelopt[torch]>=0.37.0 --no-build-isolation
-pip install https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-5f8d397/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl --force-reinstall
-
-# 克隆并构建指定 Commit 的 Megatron-LM
-cd $BASE_DIR
-git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
-  cd Megatron-LM/ && git checkout ${MEGATRON_COMMIT} && \
-  pip install -e .
-```
-
-### 第六步：部署 Slime 核心库并应用全局补丁
-最终阶段是将核心的 `slime` 库拉取并安装，处理个别的版本冲突（如 `numpy<2`），并将 `slime` 提供的专门针对当前环境的补丁应用到刚下载的 SGLang 和 Megatron-LM 中。
-```bash
-# 如果本地没有 slime 则拉取并安装
-if [ ! -d "$BASE_DIR/slime" ]; then
-  cd $BASE_DIR
-  git clone https://github.com/THUDM/slime.git
-  cd slime/
-  export SLIME_DIR=$BASE_DIR/slime
-  pip install -e .
-else
-  export SLIME_DIR=$BASE_DIR/
-  pip install -e .
-fi
-
-# 处理特定的 CUDA 及 Numpy 版本冲突
-pip install nvidia-cudnn-cu12==9.16.0.29
-pip install "numpy<2"
-
-# 针对 sglang 和 megatron 打上 slime 提供的补丁
-cd $BASE_DIR/sglang
-git apply $SLIME_DIR/docker/patch/v0.5.9/sglang.patch
-cd $BASE_DIR/Megatron-LM
-git apply $SLIME_DIR/docker/patch/v0.5.9/megatron.patch
-```
-
-### 附加说明：后台挂起运行
-由于整个编译和拉取过程执行时间极长，强烈建议使用 `nohup` 将其挂起在后台运行，以防 SSH 连接断开导致安装中途失败。您可以将上述所有步骤保存为 `build_conda.sh`，然后运行：
+### 附加说明1：后台挂起运行
+由于脚本执行时间较长，强烈建议使用 `nohup` 将其挂起在后台运行，以防 SSH 连接断开导致安装失败。您可以运行以下命令：
 
 ```bash
 nohup ./build_conda.sh > build_conda.log 2>&1 &
 ```
 
-执行后，您可以通过以下命令实时查看安装进度：
+执行后，您可以通过以下命令实时查看安装进度和日志：
 ```bash
 tail -f build_conda.log
 ```
+
+在安装并激活 Python 3.12 后，由于我们已经配置了本地代理，可以直接使用官方源，并安装极速包管理器 `uv`，用 `alias pip="uv pip"` 替代原生 pip，从而极大缩短依赖安装时间。
+```bash
+micromamba create -n slime python=3.12 pip -c conda-forge -y --override-channels
+micromamba activate slime
+
+# 安装 uv 并开启 pip 加速
+pip install uv
+alias pip="uv pip"
+```
+
+为了彻底解决 `nvcc` 找不到的问题，我们在环境内部直接使用 micromamba 安装与 PyTorch 匹配的 CUDA 12.9 工具链，并导出相应的环境变量。
+```bash
+# install cuda 12.9 as it's the default cuda version for torch
+micromamba install -n slime cuda cuda-nvtx cuda-nvtx-dev nccl -c nvidia/label/cuda-12.9.1 -y
+micromamba install -n slime -c conda-forge cudnn -y
+
+# 导出环境变量让后续编译（如 flash-attn、apex）能找到 micromamba 内部的 CUDA 工具链
+export CUDA_HOME=$MAMBA_ROOT_PREFIX/envs/slime
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib:$LD_LIBRARY_PATH
+
+# 开启全局代理，利用本机运行的 Mihomo 代理加速 GitHub 拉取
+export http_proxy=http://127.0.0.1:8890
+export https_proxy=http://127.0.0.1:8890
+export all_proxy=http://127.0.0.1:8890
+```
+
+### 附加说明2：后台挂起运行
+如需加速 GitHub 资源下载，可将相关地址替换为镜像站前缀 `https://gh-proxy.com/`，例如：  
+`https://gh-proxy.com/https://github.com/xxx/yyy/archive/refs/tags/v1.0.0.tar.gz`
+
+### 第二步：安装 PyTorch
+```bash
+pip install cuda-python==12.9
+pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu129
+```
+
+### 第三步：手动克隆构建工具与大型仓库
+由于项目中涉及到大量的源码编译，我们需要构建工具 `ninja`。
+同时为了避免脚本中的 `git clone` 受全局 URL 替换等错误配置的影响，对于 `sglang`、`Megatron-LM` 以及 `slime`，脚本已经更改为使用基于 SSH 的代理拉取方式（`git clone git@github.com:...`），您需要提前配置好 SSH 的 `ProxyCommand` 和公钥：
+```bash
+pip install cmake ninja
+```
+
+### 第四步：安装其他依赖与补丁应用
+随后脚本将依次源码安装 `flash-attn`、`apex`、`Megatron-LM`，并拉取 `slime` 源码应用相应补丁：
+```bash
+pip install nvidia-cudnn-cu12==9.16.0.29
+```
+
+### 第五步：处理依赖版本兼容问题
+在所有的基础依赖安装完成后，由于目前上游依赖存在一些严格的版本限制（比如较新的 `huggingface-hub` 和旧版本 `transformers` 的冲突），我们需要将一些可能自动被装成过高版本的库降级：
+```bash
+pip install "huggingface-hub<1.0"
+```
+
+### 第六步：日常激活环境与运行任务
+在未来的每次登录中，您需要手动初始化 micromamba 并激活 `slime` 虚拟环境。只有在环境激活后，才能运行训练脚本（比如 `ray` 命令）：
+```bash
+export MAMBA_EXE="$HOME/.local/bin/micromamba"
+export MAMBA_ROOT_PREFIX="$HOME/micromamba"
+eval "$("$MAMBA_EXE" shell hook --shell bash --root-prefix "$MAMBA_ROOT_PREFIX")"
+micromamba activate slime
+```
+*提示：您可以将这四行命令追加到您的 `~/.bashrc` 文件末尾，这样以后每次登录就只需要执行 `micromamba activate slime` 即可。*
 
 ## 3. 遇到的问题和解决方案
 

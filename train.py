@@ -23,7 +23,7 @@ def train(args):
     # create the actor and critic models
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 
-    if args.offload_rollout:
+    if args.offload_rollout: #将rollout引擎的模型权重重新加载到GPU内存中
         ray.get(rollout_manager.onload_weights.remote())
 
     # Always push actor weights to rollout once weights are loaded.
@@ -40,9 +40,12 @@ def train(args):
         ray.get(rollout_manager.eval.remote(rollout_id=0))
 
     def offload_train(actor_trains_this_step):
-        # Each model auto-offloads after train() when offload_train is set,
-        # so we only need clear_memory for the non-offload case.
-        if not args.offload_train:
+        if args.offload_train:
+            if actor_trains_this_step:
+                ray.get(actor_model.offload.remote())
+            if args.use_critic:
+                ray.get(critic_model.offload.remote())
+        else:
             if not args.use_critic or actor_trains_this_step:
                 actor_model.clear_memory()
             else:

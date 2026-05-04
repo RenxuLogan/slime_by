@@ -47,7 +47,7 @@ CKPT_ARGS=(
    --ref-load /home/brx/models/Qwen3-4B_torch_dist
    --load /home/brx/data/Qwen3-4B_slime/
    --save /home/brx/data/Qwen3-4B_slime/
-   --save-interval 20
+   --save-interval 2
 )
 
 ROLLOUT_ARGS=(
@@ -57,7 +57,7 @@ ROLLOUT_ARGS=(
    --apply-chat-template
    --rollout-shuffle
    --rm-type deepscaler
-   --num-rollout 3000
+   --num-rollout 5
    --rollout-batch-size 32
    --n-samples-per-prompt 8
    --rollout-max-response-len 8192
@@ -68,7 +68,7 @@ ROLLOUT_ARGS=(
 )
 
 EVAL_ARGS=(
-   --eval-interval 20
+   --eval-interval 2
    --eval-prompt-data aime /home/brx/datasets/aime-2024/aime-2024.jsonl
    --n-samples-per-eval-prompt 16
    --eval-max-response-len 16384

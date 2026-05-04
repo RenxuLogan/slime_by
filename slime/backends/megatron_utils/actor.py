@@ -368,9 +368,6 @@ class MegatronTrainRayActor(TrainRayActor):
             self.train_actor(rollout_id, rollout_data, external_data=external_data)
             result = None
 
-        if self.args.offload_train:
-            self.sleep()
-
         return result
 
     def train_critic(self, rollout_id: int, rollout_data: RolloutBatch):
